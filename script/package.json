@@ -1,0 +1,17 @@
+{
+  "name": "airdrop",
+  "version": "1.0.0",
+  "description": "eosBLACK airdrop script",
+  "main": "eos-airdrop.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "eosjs": "^13.0.0",
+    "mysql": "^2.15.0",
+    "read": "^1.0.7",
+    "request": "^2.87.0"
+  }
+}

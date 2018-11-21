@@ -15,69 +15,77 @@
 using namespace std;
 using namespace eosio;
 
-namespace eosiosystem {
-   class system_contract;
-}
-
 namespace eosblack {
 
-	class blacktoken : public contract {
+	CONTRACT blacktoken : public contract {
 
 		public:
-			blacktoken( account_name self ):contract(self),
-										    tokenconfig(_self, _self)
+			blacktoken( name receiver, name code, datastream<const char*> ds ) :
+            	contract(receiver, code, ds),
+				tokenconfig(receiver, receiver.value)
 			{ }
 
-			void create( account_name issuer, asset maximum_supply );
+			ACTION create( name issuer, asset maximum_supply );
+			ACTION issue( name to, asset quantity, string memo );
+			ACTION transfer( name from, name to, asset quantity, string memo );
+			ACTION retire( asset quantity, string memo );
+			ACTION open( name owner, const symbol& symbol, name ram_payer );
+			ACTION close( name owner, const symbol& symbol );
 
-			void issue( account_name to, asset quantity, string memo );
+			ACTION addblklst( name user, const symbol& symbol );
+			ACTION rmvblklst( name user, const symbol& symbol );
+			ACTION stop( const symbol& symbol );
+			ACTION restart( const symbol& symbol );
 
-			void transfer( account_name from,
-						   account_name to,
-						   asset        quantity,
-						   string       memo );
+			ACTION addpartner( name account, asset quantity, uint64_t expire_date, string memo );
+			ACTION rmvpartner( name account, const symbol& symbol, string memo );
 
-			void supplement( asset quantity );
+			static asset get_supply( name token_contract_account, symbol_code sym_code )
+			{
+				stats_t statstable( token_contract_account, sym_code.raw() );
+				const auto& st = statstable.get( sym_code.raw() );
+				return st.supply;
+			}
 
-			void burn( asset quantity );
-
-			inline asset get_supply( symbol_name sym )const;
-
-			inline asset get_balance( account_name owner, symbol_name sym )const;
-
-			void addblklst( account_name user, asset asset_for_symbol );
-
-			void rmvblklst( account_name user, asset asset_for_symbol );
-
-			inline void stop( asset asset_for_symbol );
-
-			inline void restart( asset asset_for_symbol );
+			static asset get_balance( name token_contract_account, name owner, symbol_code sym_code )
+			{
+				accounts_t accountstable( token_contract_account, owner.value );
+				const auto& ac = accountstable.get( sym_code.raw() );
+				return ac.balance;
+			}
 
 		private:
-			// @abi table accounts i64
-			struct account {
+			TABLE account {
 				asset    balance;
 
-				uint64_t primary_key()const { return balance.symbol.name(); }
+				uint64_t primary_key()const { return balance.symbol.code().raw(); }
 			};
 
-			// @abi table stat i64
-			struct cur_stats {
+			TABLE currency_stats {
 				asset          supply;
 				asset          max_supply;
-				account_name   issuer;
+				name		   issuer;
 
-				uint64_t primary_key()const { return supply.symbol.name(); }
+				uint64_t primary_key()const { return supply.symbol.code().raw(); }
 			};
 
-			typedef eosio::multi_index<N(accounts), account> accounts;
-			typedef eosio::multi_index<N(stat), cur_stats> stats;
+			typedef eosio::multi_index< "accounts"_n, account > accounts_t;
+			typedef eosio::multi_index< "stat"_n, currency_stats > stats_t;
 
-			void sub_balance( account_name owner, asset value );
-			void add_balance( account_name owner, asset value, account_name ram_payer );
+			void sub_balance( name owner, asset value );
+			void add_balance( name owner, asset value, name ram_payer );
 
-			// @abi table blackcfg i64
-			struct tokencfg {
+			TABLE partner {
+				asset			balance;
+				uint64_t		expire_date;
+
+				uint64_t primary_key()const { return balance.symbol.code().raw(); }
+			};
+
+			typedef eosio::multi_index< "partners"_n, partner > partners_t;
+
+			//TABLE tokencfg {
+			struct [[eosio::table("blackcfg")]]	tokencfg {
 				bool				 is_runnable;
 				uint64_t			 create_time;
 				uint32_t			 max_period;
@@ -85,10 +93,10 @@ namespace eosblack {
 				uint32_t			 period_uint;
 				uint64_t			 lock_balance;
 				uint64_t			 balance_uint;
-				vector<account_name> blacklist;
+				vector<name> 		 blacklist;
 			};
 
-			typedef singleton<N(blackcfg), tokencfg> tokencfg_singleton;
+			typedef singleton<"blackcfg"_n, tokencfg> tokencfg_singleton;
 
 			tokencfg_singleton		tokenconfig;
 
@@ -100,39 +108,28 @@ namespace eosblack {
 
 			bool is_runnable();
 
-			bool is_valid_account( account_name to );
+			bool is_valid_account( name to );
 
-			inline bool is_permit_transfer( account_name from, account_name to );
+			inline bool is_permit_transfer( name from, name to );
 
-			bool is_blacklist( account_name user );
+			bool is_blacklist( name user );
+
+			bool is_hold_transfer( name user, asset quantity);
 
 			uint64_t available_balance ( uint64_t contract_balance );
 
-			void auth_check( asset asset_for_symbol );
+			void auth_check( const symbol& symbol );
 
 		public:
 			struct transfer_args {
-				account_name  from;
-				account_name  to;
-				asset         quantity;
-				string        memo;
+				name  		from;
+				name  		to;
+				asset       quantity;
+				string      memo;
 			};
 
 		private:
 	};
 
-	asset blacktoken::get_supply( symbol_name sym )const
-	{
-		stats statstable( _self, sym );
-		const auto& st = statstable.get( sym );
-		return st.supply;
-	}
-
-	asset blacktoken::get_balance( account_name owner, symbol_name sym )const
-	{
-		accounts accountstable( _self, owner );
-		const auto& ac = accountstable.get( sym );
-		return ac.balance;
-	}
 
 } /// namespace eosio

@@ -1,14 +1,8 @@
-/**
- *  @file
- *  @copyright defined in eos/LICENSE.txt
- */
-
 #include "eosBlack.token.hpp"
 
 namespace eosblack {
 
-void blacktoken::create( account_name issuer,
-                    asset        maximum_supply )
+ACTION blacktoken::create( name issuer, asset maximum_supply )
 {
     require_auth( _self );
 
@@ -17,8 +11,8 @@ void blacktoken::create( account_name issuer,
     eosio_assert( maximum_supply.is_valid(), "invalid supply");
     eosio_assert( maximum_supply.amount > 0, "max-supply must be positive");
 
-    stats statstable( _self, sym.name() );
-    auto existing = statstable.find( sym.name() );
+    stats_t statstable( _self, sym.code().raw() );
+    auto existing = statstable.find( sym.code().raw() );
     eosio_assert( existing == statstable.end(), "blacktoken with symbol already exists" );
 
 	blacktoken_initialize();
@@ -30,17 +24,16 @@ void blacktoken::create( account_name issuer,
 		    });
 }
 
-
-void blacktoken::issue( account_name to, asset quantity, string memo )
+ACTION blacktoken::issue( name to, asset quantity, string memo )
 {
 	auto sym = quantity.symbol;
 	eosio_assert( is_account( to ), "to account does not exist");
     eosio_assert( sym.is_valid(), "invalid symbol name" );
     eosio_assert( memo.size() <= 256, "memo has more than 256 bytes" );
 
-    auto sym_name = sym.name();
-    stats statstable( _self, sym_name );
-    auto existing = statstable.find( sym_name );
+    auto sym_code_raw = sym.code().raw();
+    stats_t statstable( _self, sym_code_raw );
+    auto existing = statstable.find( sym_code_raw );
     eosio_assert( existing != statstable.end(), "blacktoken with symbol does not exist, create blacktoken before issue" );
     const auto& st = *existing;
 
@@ -61,21 +54,18 @@ void blacktoken::issue( account_name to, asset quantity, string memo )
 	eosio_assert( quantity.amount <= available_balance(st.max_supply.amount - st.supply.amount),
 					"currency has locking... please check lock time and amount");
 
-	statstable.modify( st, 0, [&]( auto& s ) {
+	statstable.modify( st, same_payer, [&]( auto& s ) {
        s.supply += quantity;
     });
 
     add_balance( st.issuer, quantity, st.issuer );
 
     if( to != st.issuer ) {
-       SEND_INLINE_ACTION( *this, transfer, {st.issuer,N(active)}, {st.issuer, to, quantity, memo});
+       SEND_INLINE_ACTION( *this, transfer, {st.issuer, "active"_n}, {st.issuer, to, quantity, memo});
 	}
 }
 
-void blacktoken::transfer( account_name from,
-	                       account_name to,
-	                       asset        quantity,
-	                       string       memo )
+ACTION blacktoken::transfer( name from, name to, asset quantity, string memo )
 {
 
 	eosio_assert( from != to, "cannot transfer to self" );
@@ -84,9 +74,9 @@ void blacktoken::transfer( account_name from,
 
 	eosio_assert( is_account( to ), "to account does not exist");
 
-    auto sym = quantity.symbol.name();
-    stats statstable( _self, sym );
-    const auto& st = statstable.get( sym );
+    auto sym = quantity.symbol.code();
+    stats_t statstable( _self, sym.raw() );
+    const auto& st = statstable.get( sym.raw() );
 
 	require_recipient( from );
     require_recipient( to );
@@ -99,100 +89,94 @@ void blacktoken::transfer( account_name from,
 	eosio_assert( is_runnable() == true, "contract was frozen");
 
 	// check black list.
-	eosio_assert( is_permit_transfer( from, to ) == true ,"not allow transfer!");
+	eosio_assert( is_blacklist(from) == false, "not allowed transfer from someone. who was register in blacklist");
+	eosio_assert( is_hold_transfer(from, quantity) == false, "partner has locking .... try after expire_date ");
 
     sub_balance( from, quantity );
 	add_balance( to, quantity, from );
 }
 
-void blacktoken::supplement( asset quantity )
+ACTION blacktoken::retire( asset quantity, string memo ) 
 {
-	auto sym = quantity.symbol;
+    auto sym = quantity.symbol;
     eosio_assert( sym.is_valid(), "invalid symbol name" );
+    eosio_assert( memo.size() <= 256, "memo has more than 256 bytes" );
 
-	auto sym_name = sym.name();
+    stats_t statstable( _self, sym.code().raw() );
+    auto existing = statstable.find( sym.code().raw() );
+    eosio_assert( existing != statstable.end(), "token with symbol does not exist" );
+    const auto& st = *existing;
 
-	stats statstable( _self, sym_name );
-
-	auto existing = statstable.find( sym_name );
-
-	eosio_assert( existing != statstable.end(), "blacktoken with symbol does not exist, create blacktoken before supplement" );
-
-	eosio_assert( is_runnable() == true, "contract was frozen");
-
-	const auto& st = *existing;
-
-    require_auth( st.issuer);
+    require_auth( st.issuer );
     eosio_assert( quantity.is_valid(), "invalid quantity" );
-    eosio_assert( quantity.amount > 0, "must issue positive quantity" );
+    eosio_assert( quantity.amount > 0, "must retire positive quantity" );
 
     eosio_assert( quantity.symbol == st.supply.symbol, "symbol precision mismatch" );
 
-    statstable.modify( st, 0, [&]( auto& s ) {
-       s.max_supply	    += quantity;
+    statstable.modify( st, eosio::same_payer, [&]( auto& s ) {
+       s.supply -= quantity;
     });
+
+    sub_balance( st.issuer, quantity );
 }
 
-void blacktoken::burn( asset quantity )
+ACTION blacktoken::open( name owner, const symbol& symbol, name ram_payer ) 
 {
-	auto sym = quantity.symbol;
-    eosio_assert( sym.is_valid(), "invalid symbol name" );
+    require_auth( ram_payer );
 
-	eosio_assert( is_runnable() == true, "contract was frozen");
+    auto sym_code_raw = symbol.code().raw();
 
-    auto sym_name = sym.name();
+    stats_t statstable( _self, sym_code_raw );
+    const auto st = statstable.get( sym_code_raw, "symbol does not exist" );
+    eosio_assert( st.supply.symbol == symbol, "symbol precision mismatch" );
 
-	stats statstable( _self, sym_name );
-
-	auto existing = statstable.find( sym_name );
-
-	eosio_assert( existing != statstable.end(), "blacktoken with symbol does not exist, create blacktoken before burn" );
-
-	const auto& st = *existing;
-
-    require_auth( st.issuer);
-    eosio_assert( quantity.is_valid(), "invalid quantity" );
-    eosio_assert( quantity.amount > 0, "must issue positive quantity" );
-    eosio_assert( quantity.symbol == st.supply.symbol, "symbol precision mismatch" );
-
-	eosio_assert( (st.max_supply.amount - st.supply.amount) >= quantity.amount , "Burn has allow when value of burn have big amount more than remain value");
-
-    statstable.modify( st, 0, [&]( auto& s ) {
-       s.max_supply	    -= quantity;
-    });
+    accounts_t acnts( _self, owner.value );
+    const auto it = acnts.find( sym_code_raw );
+    if( it == acnts.end() ) {
+        acnts.emplace( ram_payer, [&]( auto& a ){
+            a.balance = eosio::asset{0, symbol};
+        });
+    }
 }
 
-void blacktoken::sub_balance( account_name owner, asset value ) {
-   accounts from_acnts( _self, owner );
+ACTION blacktoken::close( name owner, const symbol& symbol ) 
+{
+    require_auth( owner );
+    accounts_t acnts( _self, owner.value );
+    const auto it = acnts.find( symbol.code().raw() );
+    eosio_assert( it != acnts.end(), "Balance row already deleted or never existed. Action won't have any effect." );
+    eosio_assert( it->balance.amount == 0, "Cannot close because the balance is not zero." );
+    acnts.erase( it );
+}
 
-   const auto& from = from_acnts.get( value.symbol.name(), "no balance object found" );
+void blacktoken::sub_balance( name owner, asset value ) 
+{
+   accounts_t from_acnts( _self, owner.value );
+
+   const auto& from = from_acnts.get( value.symbol.code().raw(), "no balance object found" );
    eosio_assert( from.balance.amount >= value.amount, "overdrawn balance" );
 
-   if( from.balance.amount == value.amount ) {
-      from_acnts.erase( from );
-   } else {
-      from_acnts.modify( from, owner, [&]( auto& a ) {
-          a.balance -= value;
-      });
-   }
+	from_acnts.modify( from, owner, [&]( auto& a ) {
+		a.balance -= value;
+	});
 }
 
-void blacktoken::add_balance( account_name owner, asset value, account_name ram_payer )
+void blacktoken::add_balance( name owner, asset value, name ram_payer )
 {
-   accounts to_acnts( _self, owner );
-   auto to = to_acnts.find( value.symbol.name() );
+   accounts_t to_acnts( _self, owner.value );
+   auto to = to_acnts.find( value.symbol.code().raw() );
    if( to == to_acnts.end() ) {
       to_acnts.emplace( ram_payer, [&]( auto& a ){
         a.balance = value;
       });
    } else {
-      to_acnts.modify( to, 0, [&]( auto& a ) {
+      to_acnts.modify( to, same_payer, [&]( auto& a ) {
         a.balance += value;
       });
    }
 }
 
-bool blacktoken::is_permit_transfer( account_name to, account_name from )
+bool blacktoken::is_permit_transfer( name to, name from )
 {
 	bool is_permit = false;
 
@@ -204,11 +188,12 @@ bool blacktoken::is_permit_transfer( account_name to, account_name from )
 	return is_permit;
 }
 
-void blacktoken::addblklst( account_name user ,asset asset_for_symbol )
+ACTION blacktoken::addblklst( name user, const symbol& symbol )
 {
+	eosio_assert( is_account( user ), "account does not exist");
 	eosio_assert(is_blacklist(user) == false, "account_name already exist in blacklist");
 
-	auth_check(asset_for_symbol);
+	auth_check(symbol);
 
 	auto tc = get_token_config();
 
@@ -217,13 +202,13 @@ void blacktoken::addblklst( account_name user ,asset asset_for_symbol )
 	update_token_config(tc);
 }
 
-void blacktoken::rmvblklst( account_name user ,asset asset_for_symbol )
+ACTION blacktoken::rmvblklst( name user, const symbol& symbol )
 {
-	auth_check(asset_for_symbol);
+	auth_check(symbol);
 
 	auto tc = get_token_config();
 
-	vector<account_name>::iterator iter;
+	vector<name>::iterator iter;
 
 	iter = find(tc.blacklist.begin(), tc.blacklist.end(), user);
 
@@ -234,9 +219,9 @@ void blacktoken::rmvblklst( account_name user ,asset asset_for_symbol )
 	update_token_config(tc);
 }
 
-inline void blacktoken::stop( asset asset_for_symbol )
+ACTION blacktoken::stop( const symbol& symbol )
 {
-	auth_check(asset_for_symbol);
+	auth_check(symbol);
 
 	auto token_config = get_token_config();
 
@@ -248,9 +233,9 @@ inline void blacktoken::stop( asset asset_for_symbol )
 }
 
 
-inline void blacktoken::restart( asset asset_for_symbol )
+ACTION blacktoken::restart( const symbol& symbol )
 {
-	auth_check(asset_for_symbol);
+	auth_check(symbol);
 
 	auto token_config = get_token_config();
 
@@ -261,15 +246,142 @@ inline void blacktoken::restart( asset asset_for_symbol )
 	update_token_config(token_config);
 }
 
-bool blacktoken::is_blacklist( account_name user)
+ACTION blacktoken::addpartner(name user, asset quantity, uint64_t expire_date, string memo )
+{
+	uint64_t utc = expire_date;
+	eosio_assert( is_account( user ), "user account does not exist");
+
+	auto sym = quantity.symbol.code();
+
+	stats_t statstable( _self, sym.raw() );
+
+	const auto& st = statstable.get( sym.raw() );
+
+	require_auth( st.issuer );
+
+	eosio_assert( quantity.amount > 0, "must transfer positive quantity" );
+	eosio_assert( quantity.symbol == st.supply.symbol, "symbol precision mismatch" );
+	eosio_assert( memo.size() <= 256, "memo has more than 256 bytes" );
+
+	eosio_assert( is_runnable() == true, "contract was frozen");
+
+	/// for	test
+
+	if( utc == 0)
+	{
+		// default locking period is 365 days.
+		utc = time_point_sec(now()).utc_seconds + (24 * 3600 * 365);
+	}
+
+	/// end
+
+	partners_t reg_acnts( _self, user.value );
+
+	auto partner = reg_acnts.find( quantity.symbol.code().raw() );
+
+	if( partner == reg_acnts.end() ) {
+		reg_acnts.emplace( st.issuer, [&]( auto& record ){
+				record.balance = quantity;
+				record.expire_date = utc;
+		});
+	} else {
+		reg_acnts.modify( partner, eosio::same_payer, [&]( auto& record ) {
+				record.balance += quantity;
+				record.expire_date = utc;
+		});
+	}
+}
+
+ACTION blacktoken::rmvpartner(name user, const symbol& symbol, string memo )
+{
+	eosio_assert( is_account( user ), "user account does not exist");
+
+	eosio_assert( memo.size() <= 256, "memo has more than 256 bytes" );
+
+	auth_check(symbol);
+
+	partners_t reg_acnts( _self, user.value );
+
+	auto partner = reg_acnts.find( symbol.code().raw() );
+
+	eosio_assert( partner != reg_acnts.end(), "no reg user name" );
+
+	reg_acnts.erase(partner);
+}
+
+bool blacktoken::is_blacklist( name user)
 {
 	auto tc = get_token_config();
 
-	vector<account_name>::iterator iter;
+	vector<name>::iterator iter;
 	iter = find(tc.blacklist.begin(), tc.blacklist.end(), user);
 
 	return iter == tc.blacklist.end() ? false : true ;
 
+}
+
+bool blacktoken::is_hold_transfer( name user, asset quantity)
+{
+	bool hold_transfer = true;
+	uint64_t current_time;
+	partners_t reg_acnts( _self, user.value );
+
+	auto partner = reg_acnts.find( quantity.symbol.code().raw() );
+
+	if (partner == reg_acnts.end())
+	{
+		hold_transfer = false;
+	} 
+	else
+	{
+		auto& partner_info = *partner;
+
+		if (partner_info.expire_date == 0)
+		{
+			hold_transfer = false;
+		} 
+		else
+		{
+			current_time = time_point_sec(now()).utc_seconds;
+
+			if (partner_info.expire_date < current_time)
+			{
+				hold_transfer = false;
+			}
+			else if ( partner_info.balance.amount > 0 )
+			{
+				accounts_t acnts_info( _self, user.value );
+
+				auto account_info = acnts_info.find( quantity.symbol.code().raw());
+
+				if ( account_info == acnts_info.end() )
+				{
+					hold_transfer = false;
+				}
+				else
+				{
+					auto& holder = *account_info;
+
+					if ( holder.balance.amount > partner_info.balance.amount &&
+							holder.balance.amount - partner_info.balance.amount >= quantity.amount)
+					{
+						hold_transfer = false;
+					}
+					else
+					{
+						hold_transfer = true;
+					}
+				}
+			}
+			else
+			{
+				hold_transfer = false;
+
+			}
+		}
+	}
+
+	return hold_transfer;
 }
 
 blacktoken::tokencfg blacktoken::get_token_config()
@@ -379,20 +491,23 @@ uint64_t blacktoken::available_balance( uint64_t contract_balance )
 			available_balance = contract_balance - ( (tc.max_period - tc.lock_period) * tc.balance_uint) - tc.lock_balance;
 		}
 	}
+	else 
+	{
+		available_balance = contract_balance;
+	}
 
 	return available_balance;
 
 }
 
-void blacktoken::auth_check( asset asset_for_symbol)
+void blacktoken::auth_check( const symbol& symbol )
 {
-	auto sym = asset_for_symbol.symbol;
-    eosio_assert( sym.is_valid(), "invalid symbol name" );
+    eosio_assert( symbol.is_valid(), "invalid symbol name" );
 
-    auto sym_name = sym.name();
-	stats statstable( _self, sym_name );
+    auto sym_code_raw = symbol.code().raw();
+	stats_t statstable( _self, sym_code_raw );
 
-    auto existing = statstable.find( sym_name );
+    auto existing = statstable.find( sym_code_raw );
     eosio_assert( existing != statstable.end(), "does not exist blacktoken with symbol" );
 
 	const auto& st = *existing;
@@ -401,4 +516,4 @@ void blacktoken::auth_check( asset asset_for_symbol)
 
 } // namespace eosblack
 
-EOSIO_ABI( eosblack::blacktoken, (create)(issue)(transfer)(addblklst)(rmvblklst)(stop)(restart)(supplement)(burn))
+EOSIO_DISPATCH( eosblack::blacktoken, (create)(issue)(transfer)(open)(close)(addblklst)(rmvblklst)(stop)(restart)(addpartner)(rmvpartner))
